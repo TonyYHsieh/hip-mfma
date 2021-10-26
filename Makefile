@@ -5,6 +5,7 @@ endif
 
 HIPCC=$(HIP_PATH)/bin/hipcc
 
+HEADERS = kernel.h
 SOURCES = gemm.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 
@@ -20,7 +21,7 @@ CXXFLAGS =-O3
 CXX=$(HIPCC)
 
 
-$(EXECUTABLE): $(OBJECTS)
+$(EXECUTABLE): $(OBJECTS) $(kernel.h)
 	$(HIPCC) $(OBJECTS) -o $@
 
 # run test
