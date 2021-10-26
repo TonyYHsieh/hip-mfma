@@ -21,10 +21,10 @@
 #define TT1 2
 
 // unroll
-#define DepthU 8
+#define DepthU 32
 
 // global read vector
-#define GRVW 1
+#define GRVW 8
 
 // MFMA instruction
 #define MFMA_T 32
@@ -44,7 +44,7 @@ struct VectorStorage
     using type = T __attribute__((ext_vector_type(Elements)));
 };
 
-__global__ __launch_bounds__(256, 2)
+__global__ __launch_bounds__(256)
 void gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ldb, int ldc)
 {
     __shared__ char lA[MT0*DepthU*sizeof(half_t)];
@@ -119,50 +119,72 @@ void gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, i
         // global read a
         for (int i=0; i < DepthU/grv_AK; i++)
         {
-            lA_wptr[i * grv_AK * MT0] = a[i * grv_AK * lda];
+            auto pG = reinterpret_cast<VectorStorage<short, GRVW>::type const*>(a       + i * grv_AK * lda);
+            auto pS = reinterpret_cast<VectorStorage<short, GRVW>::type      *>(lA_wptr + i * grv_AK * MT0);
+            *pS = *pG;
         }
 
         // global read b
         for (int i=0; i < DepthU/grv_BK; i++)
         {
-            lB_wptr[i * grv_BK * MT1] = b[i * grv_BK * ldb];
+            auto pG = reinterpret_cast<VectorStorage<short, GRVW>::type const*>(b       + i * grv_BK * ldb);
+            auto pS = reinterpret_cast<VectorStorage<short, GRVW>::type      *>(lB_wptr + i * grv_BK * MT1);
+            *pS = *pG;
         }
 
+       // sync share storage
         __syncthreads();
 
-        // read a
-        for(int i=0; i<TT0; i++) // tile
+        for (int iter=DepthU/MFMA_K; iter>0; iter--)
         {
-            for(int j=0; j<MIIN; j++) // unroll
+            // read a
+            for(int i=0; i<TT0; i++) // tile
             {
-                int dst_index = j       + i * MIIN;
-                int src_index = j * MT0 + i * MFMA_T;
-                tA[dst_index] = lA_rptr[src_index];
+                for(int j=0; j<MIIN; j++) // unroll
+                {
+                    int dst_index = j       + i * MIIN;
+                    int src_index = j * MT0 + i * MFMA_T;
+                    tA[dst_index] = lA_rptr[src_index];
+                }
             }
+
+            // read b
+            for(int i=0; i<TT1; i++) // tile
+            {
+                for(int j=0; j<MIIN; j++) // unroll
+                {
+                    int dst_index = j       + i * MIIN;
+                    int src_index = j * MT1 + i * MFMA_T;
+                    tB[dst_index] = lB_rptr[src_index];
+                }
+            }
+
+            // mma
+            for(int j=0; j<TT1; j++)
+            {
+                for(int i=0; i<TT0; i++)
+                {
+                    pD[i + j * TT0] = __builtin_amdgcn_mfma_f32_32x32x8f16(pA[i], pB[j], pC[i + j * TT0], 0, 0, 0);
+                }
+            }
+
+            // inc local read to next mi k
+            lA_rptr += MFMA_K * MT0;
+            lB_rptr += MFMA_K * MT1;
         }
 
-        // read b
-        for(int i=0; i<TT1; i++) // tile
-        {
-            for(int j=0; j<MIIN; j++) // unroll
-            {
-                int dst_index = j       + i * MIIN;
-                int src_index = j * MT1 + i * MFMA_T;
-                tB[dst_index] = lB_rptr[src_index];
-            }
-        }
-
-        for(int j=0; j<TT1; j++)
-        {
-            for(int i=0; i<TT0; i++)
-            {
-                pD[i + j * TT0] = __builtin_amdgcn_mfma_f32_32x32x8f16(pA[i], pB[j], pC[i + j * TT0], 0, 0, 0);
-            }
-        }
+        // reset local read pointer
+        lA_rptr -= DepthU * MT0;
+        lB_rptr -= DepthU * MT1;
 
         a += DepthU * lda;
         b += DepthU * ldb;
     }
+
+
+    ////////////////////////////////////////////////////////////////////
+    // store part
+    ////////////////////////////////////////////////////////////////////
 
     c += (hipBlockIdx_x * MT0     + hipBlockIdx_y * MT1 * ldc);
     c += (wave_id0      * WT0     + wave_id1      * WT1 * ldc);

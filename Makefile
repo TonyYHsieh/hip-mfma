@@ -21,7 +21,7 @@ CXXFLAGS =-O3
 CXX=$(HIPCC)
 
 
-$(EXECUTABLE): $(OBJECTS) $(kernel.h)
+$(EXECUTABLE): $(OBJECTS) $(HEADERS)
 	$(HIPCC) $(OBJECTS) -o $@
 
 # run test
