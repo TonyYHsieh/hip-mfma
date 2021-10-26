@@ -28,12 +28,24 @@ THE SOFTWARE.
 #include "half.h"
 #include "kernel.h"
 
+#define CHECK_HIP_ERROR(status)                   \
+    if(status != hipSuccess)                      \
+    {                                             \
+        fprintf(stderr,                           \
+                "hip error: '%s'(%d) at %s:%d\n", \
+                hipGetErrorString(status),        \
+                status,                           \
+                __FILE__,                         \
+                __LINE__);                        \
+        exit(EXIT_FAILURE);                       \
+    }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // host code
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 using namespace std;
 
-void deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, int N, int K)
+float deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, int N, int K, int Iteration)
 {
   // device init and run
   int lda = M;
@@ -51,17 +63,34 @@ void deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, i
   HIP_ASSERT(hipMemcpy(deviceA, hostA, M*K*sizeof(half_t), hipMemcpyHostToDevice));
   HIP_ASSERT(hipMemcpy(deviceB, hostB, N*K*sizeof(half_t), hipMemcpyHostToDevice));
 
-  hipLaunchKernelGGL(gemmKernel,
-                  dim3((M/MT0), (N/MT1)),
-                  dim3(256),
-                  0, 0,
-                  deviceA ,deviceB ,deviceC, K, lda, ldb, ldc);
+  hipEvent_t startEvent, stopEvent;
+  CHECK_HIP_ERROR(hipEventCreate(&startEvent));
+  CHECK_HIP_ERROR(hipEventCreate(&stopEvent));
+
+  CHECK_HIP_ERROR(hipEventRecord(startEvent));
+  for(int i=0; i<Iteration; i++)
+  {
+      // MT0, 1 in kernel.h
+      hipLaunchKernelGGL(gemmKernel,
+                      dim3((M/MT0), (N/MT1)),
+                      dim3(256),
+                      0, 0,
+                      deviceA ,deviceB ,deviceC, K, lda, ldb, ldc);
+  }
+  CHECK_HIP_ERROR(hipEventRecord(stopEvent));
+  CHECK_HIP_ERROR(hipEventSynchronize(stopEvent));
+
+  float avg_ms;
+  CHECK_HIP_ERROR(hipEventElapsedTime(&avg_ms, startEvent, stopEvent));
+  float gflops = 2.0 * M * N * K / (avg_ms / Iteration) / 1e6;
 
   HIP_ASSERT(hipMemcpy(hostC, deviceC, M*N*sizeof(float), hipMemcpyDeviceToHost));
 
   HIP_ASSERT(hipFree(deviceA));
   HIP_ASSERT(hipFree(deviceB));
   HIP_ASSERT(hipFree(deviceC));
+
+  return gflops;
 }
 
 void hostGemm(const half_t* a, const half_t* b, float* c, int M, int N, int K)
@@ -99,19 +128,19 @@ void dumpBuffer(const char* str, const T* buf, int M, int N)
 
 int main(int argc, char** argv) {
 
-  if (argc != 4)
+  if (argc != 6)
   {
-      std::cout << "a.out [m] [m] [k]" << std::endl;
+      std::cout << "a.out [m] [m] [k] [v] [iter]" << std::endl;
   }
 
-  int m = std::atoi(argv[1]);
-  int n = std::atoi(argv[2]);
-  int k = std::atoi(argv[3]);
+  int m    = std::atoi(argv[1]);
+  int n    = std::atoi(argv[2]);
+  int k    = std::atoi(argv[3]);
+  int val  = std::atoi(argv[4]);
+  int iter = std::atoi(argv[5]);
+
   int errors = 0;
 
-  std::cout << "m " << m << std::endl;
-  std::cout << "n " << n << std::endl;
-  std::cout << "k " << k << std::endl;
 
   half_t* hostA = (half_t*)malloc(m * k * sizeof(half_t));
   half_t* hostB = (half_t*)malloc(n * k * sizeof(half_t));
@@ -133,29 +162,38 @@ int main(int argc, char** argv) {
   }
 
   // device gemm
-  deviceGemm(hostA, hostB, hostC, m, n, k);
+  float gflops = deviceGemm(hostA, hostB, hostC, m, n, k, iter);
 
-  // host gemm
-  hostGemm(hostA, hostB, ref_C, m, n, k);
+  if (val)
+  {
+      // host gemm
+      hostGemm(hostA, hostB, ref_C, m, n, k);
 
-  hipDeviceSynchronize();
+      // verify the results
+      errors = 0;
+      for (int i = 0; i < m * n; i++) {
+          if (hostC[i] != ref_C[i]) {
+              errors++;
+          }
+      }
 
-  // verify the results
-  errors = 0;
-  for (int i = 0; i < m * n; i++) {
-      if (hostC[i] != ref_C[i]) {
-          errors++;
+      if (errors!=0) {
+          printf("FAILED: %d errors\n",errors);
+      } else {
+          printf ("PASSED!\n");
       }
   }
 
-  if (errors!=0) {
-      printf("FAILED: %d errors\n",errors);
-  } else {
-      printf ("PASSED!\n");
+  // conclusion
+  std::cout << " m " << m << " n " << n << " k " << k << " gflops " << gflops << " ";
+  if (val)
+  {
+     if (errors)
+         std::cout << "Fail:" << errors;
+     else
+         std::cout << "Pass!";
   }
-
-  // dumpBuffer("hostC", hostC, m, n);
-  // dumpBuffer("ref_C", ref_C, m, n);
+  std::cout << std::endl;
 
   free(hostA);
   free(hostB);
