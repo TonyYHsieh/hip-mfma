@@ -5,8 +5,7 @@ endif
 
 HIPCC=$(HIP_PATH)/bin/hipcc
 
-HEADERS = kernel.h
-SOURCES = gemm.cpp
+SOURCES = gemm.cpp kernel.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 
 EXECUTABLE=gemm

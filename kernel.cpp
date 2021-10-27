@@ -1,9 +1,22 @@
-#pragma once
-
 #include "hip/hip_runtime.h"
 #include "half.h"
 
-#define HIP_ASSERT(x) (assert((x)==hipSuccess))
+#define CHECK_HIP_ERROR(status)                   \
+    if(status != hipSuccess)                      \
+    {                                             \
+        fprintf(stderr,                           \
+                "hip error: '%s'(%d) at %s:%d\n", \
+                hipGetErrorString(status),        \
+                status,                           \
+                __FILE__,                         \
+                __LINE__);                        \
+        exit(EXIT_FAILURE);                       \
+    }
+
+
+////////////////////////////////////////////////////////////////////
+// Kernel Configuration
+////////////////////////////////////////////////////////////////////
 
 #define TOTAL_THREAD 256
 #define WAVE_SIZE 64
@@ -37,6 +50,11 @@
 #define MFMA_OU 4
 #define MFMA_OG 4
 
+
+////////////////////////////////////////////////////////////////////
+// Kernel Implementation
+////////////////////////////////////////////////////////////////////
+
 // Native types can use explicit vector extension
 template <typename T, int Elements>
 struct VectorStorage
@@ -44,8 +62,8 @@ struct VectorStorage
     using type = T __attribute__((ext_vector_type(Elements)));
 };
 
-__global__ __launch_bounds__(256)
-void gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ldb, int ldc)
+__global__ void __launch_bounds__(256, 2)
+gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ldb, int ldc)
 {
     __shared__ char lA[MT0*DepthU*sizeof(half_t)];
     __shared__ char lB[MT1*DepthU*sizeof(half_t)];
@@ -208,3 +226,55 @@ void gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, i
 }
 
 
+////////////////////////////////////////////////////////////////////
+// Host Entry
+////////////////////////////////////////////////////////////////////
+
+__host__
+float deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, int N, int K, int Iteration)
+{
+  // device init and run
+  int lda = M;
+  int ldb = N;
+  int ldc = M;
+
+  half_t* deviceA;
+  half_t* deviceB;
+  float*  deviceC;
+
+  CHECK_HIP_ERROR(hipMalloc((void**)&deviceA, M*K*sizeof(half_t)));
+  CHECK_HIP_ERROR(hipMalloc((void**)&deviceB, N*K*sizeof(half_t)));
+  CHECK_HIP_ERROR(hipMalloc((void**)&deviceC, M*N*sizeof(float)));
+
+  CHECK_HIP_ERROR(hipMemcpy(deviceA, hostA, M*K*sizeof(half_t), hipMemcpyHostToDevice));
+  CHECK_HIP_ERROR(hipMemcpy(deviceB, hostB, N*K*sizeof(half_t), hipMemcpyHostToDevice));
+
+  hipEvent_t startEvent, stopEvent;
+  CHECK_HIP_ERROR(hipEventCreate(&startEvent));
+  CHECK_HIP_ERROR(hipEventCreate(&stopEvent));
+
+  CHECK_HIP_ERROR(hipEventRecord(startEvent));
+  for(int i=0; i<Iteration; i++)
+  {
+      // MT0, 1 in kernel.h
+      hipLaunchKernelGGL(gemmKernel,
+                      dim3((M/MT0), (N/MT1)),
+                      dim3(256),
+                      0, 0,
+                      deviceA ,deviceB ,deviceC, K, lda, ldb, ldc);
+  }
+  CHECK_HIP_ERROR(hipEventRecord(stopEvent));
+  CHECK_HIP_ERROR(hipEventSynchronize(stopEvent));
+
+  float avg_ms;
+  CHECK_HIP_ERROR(hipEventElapsedTime(&avg_ms, startEvent, stopEvent));
+  float gflops = 2.0 * M * N * K / (avg_ms / Iteration) / 1e6;
+
+  CHECK_HIP_ERROR(hipMemcpy(hostC, deviceC, M*N*sizeof(float), hipMemcpyDeviceToHost));
+
+  CHECK_HIP_ERROR(hipFree(deviceA));
+  CHECK_HIP_ERROR(hipFree(deviceB));
+  CHECK_HIP_ERROR(hipFree(deviceC));
+
+  return gflops;
+}

@@ -26,72 +26,13 @@ THE SOFTWARE.
 #include<iostream>
 #include "hip/hip_runtime.h"
 #include "half.h"
-#include "kernel.h"
-
-#define CHECK_HIP_ERROR(status)                   \
-    if(status != hipSuccess)                      \
-    {                                             \
-        fprintf(stderr,                           \
-                "hip error: '%s'(%d) at %s:%d\n", \
-                hipGetErrorString(status),        \
-                status,                           \
-                __FILE__,                         \
-                __LINE__);                        \
-        exit(EXIT_FAILURE);                       \
-    }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // host code
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 using namespace std;
 
-float deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, int N, int K, int Iteration)
-{
-  // device init and run
-  int lda = M;
-  int ldb = N;
-  int ldc = M;
-
-  half_t* deviceA;
-  half_t* deviceB;
-  float*  deviceC;
-
-  HIP_ASSERT(hipMalloc((void**)&deviceA, M*K*sizeof(half_t)));
-  HIP_ASSERT(hipMalloc((void**)&deviceB, N*K*sizeof(half_t)));
-  HIP_ASSERT(hipMalloc((void**)&deviceC, M*N*sizeof(float)));
-
-  HIP_ASSERT(hipMemcpy(deviceA, hostA, M*K*sizeof(half_t), hipMemcpyHostToDevice));
-  HIP_ASSERT(hipMemcpy(deviceB, hostB, N*K*sizeof(half_t), hipMemcpyHostToDevice));
-
-  hipEvent_t startEvent, stopEvent;
-  CHECK_HIP_ERROR(hipEventCreate(&startEvent));
-  CHECK_HIP_ERROR(hipEventCreate(&stopEvent));
-
-  CHECK_HIP_ERROR(hipEventRecord(startEvent));
-  for(int i=0; i<Iteration; i++)
-  {
-      // MT0, 1 in kernel.h
-      hipLaunchKernelGGL(gemmKernel,
-                      dim3((M/MT0), (N/MT1)),
-                      dim3(256),
-                      0, 0,
-                      deviceA ,deviceB ,deviceC, K, lda, ldb, ldc);
-  }
-  CHECK_HIP_ERROR(hipEventRecord(stopEvent));
-  CHECK_HIP_ERROR(hipEventSynchronize(stopEvent));
-
-  float avg_ms;
-  CHECK_HIP_ERROR(hipEventElapsedTime(&avg_ms, startEvent, stopEvent));
-  float gflops = 2.0 * M * N * K / (avg_ms / Iteration) / 1e6;
-
-  HIP_ASSERT(hipMemcpy(hostC, deviceC, M*N*sizeof(float), hipMemcpyDeviceToHost));
-
-  HIP_ASSERT(hipFree(deviceA));
-  HIP_ASSERT(hipFree(deviceB));
-  HIP_ASSERT(hipFree(deviceC));
-
-  return gflops;
-}
+extern float deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, int N, int K, int Iteration);
 
 void hostGemm(const half_t* a, const half_t* b, float* c, int M, int N, int K)
 {
@@ -175,12 +116,6 @@ int main(int argc, char** argv) {
           if (hostC[i] != ref_C[i]) {
               errors++;
           }
-      }
-
-      if (errors!=0) {
-          printf("FAILED: %d errors\n",errors);
-      } else {
-          printf ("PASSED!\n");
       }
   }
 
