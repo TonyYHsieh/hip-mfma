@@ -62,7 +62,7 @@ struct VectorStorage
     using type = T __attribute__((ext_vector_type(Elements)));
 };
 
-__global__ void __launch_bounds__(256, 2)
+__global__ void __launch_bounds__(256)
 gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ldb, int ldc)
 {
     __shared__ char lA[MT0*DepthU*sizeof(half_t)];
