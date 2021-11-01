@@ -52,29 +52,6 @@
 #define MFMA_OU 4
 #define MFMA_OG 4
 
-template <typename T>
-__device__ T* cast_pointer_to_generic_address_space(T CONSTANT* p)
-{
-    // cast a pointer in "Constant" address space (4) to "Generic" address space (0)
-    // only c-style pointer cast seems be able to be compiled
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wold-style-cast"
-    return (T*)p; // NOLINT(old-style-cast)
-#pragma clang diagnostic pop
-}
-
-template <typename T>
-__host__ __device__ T CONSTANT* cast_pointer_to_constant_address_space(T* p)
-{
-    // cast a pointer in "Generic" address space (0) to "Constant" address space (4)
-    // only c-style pointer cast seems be able to be compiled
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wold-style-cast"
-    return (T CONSTANT*)p; // NOLINT(old-style-cast)
-#pragma clang diagnostic pop
-}
-
-
 
 ////////////////////////////////////////////////////////////////////
 // Kernel Implementation
@@ -87,23 +64,9 @@ struct VectorStorage
     using type = T __attribute__((ext_vector_type(Elements)));
 };
 
-struct Argument
-{
-    int K;
-    int lda;
-    int ldb;
-    int ldc;
-};
-
 __global__ void __launch_bounds__(256, 2)
-gemmKernel(const half_t*  a, const half_t*  b, float*  c)
+gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ldb, int ldc)
 {
-//    const auto argu = *reinterpret_cast<const Augement*>(cast_pointer_to_generic_address_space(p_const_argu));
-    int K   = 1024; // argu.K;
-    int lda = 1024; // argu.lda;
-    int ldb = 1024; // argu.ldb;
-    int ldc = 1024; // argu.ldc;
-
     __shared__ char lA[MT0*DepthU*sizeof(half_t)];
     __shared__ char lB[MT1*DepthU*sizeof(half_t)];
 
@@ -263,26 +226,20 @@ __host__
 float deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, int N, int K, int Iteration)
 {
   // device init and run
-  Argument argu;
-  argu.K = K;
-  argu.lda = M;
-  argu.ldb = N;
-  argu.ldc = M;
-  
+  int lda = M;
+  int ldb = N;
+  int ldc = M;
 
   half_t* deviceA;
   half_t* deviceB;
   float*  deviceC;
-  Argument* deviceArg;
 
-  CHECK_HIP_ERROR(hipMalloc((void**)&deviceA,   M*K*sizeof(half_t)));
-  CHECK_HIP_ERROR(hipMalloc((void**)&deviceB,   N*K*sizeof(half_t)));
-  CHECK_HIP_ERROR(hipMalloc((void**)&deviceC,   M*N*sizeof(float)));
-  CHECK_HIP_ERROR(hipMalloc((void**)&deviceArg, sizeof(Argument)));
+  CHECK_HIP_ERROR(hipMalloc((void**)&deviceA, M*K*sizeof(half_t)));
+  CHECK_HIP_ERROR(hipMalloc((void**)&deviceB, N*K*sizeof(half_t)));
+  CHECK_HIP_ERROR(hipMalloc((void**)&deviceC, M*N*sizeof(float)));
 
-  CHECK_HIP_ERROR(hipMemcpy(deviceA,   hostA, M*K*sizeof(half_t), hipMemcpyHostToDevice));
-  CHECK_HIP_ERROR(hipMemcpy(deviceB,   hostB, N*K*sizeof(half_t), hipMemcpyHostToDevice));
-  CHECK_HIP_ERROR(hipMemcpy(deviceArg, &argu, sizeof(Argument),   hipMemcpyHostToDevice));
+  CHECK_HIP_ERROR(hipMemcpy(deviceA, hostA, M*K*sizeof(half_t), hipMemcpyHostToDevice));
+  CHECK_HIP_ERROR(hipMemcpy(deviceB, hostB, N*K*sizeof(half_t), hipMemcpyHostToDevice));
 
   hipEvent_t startEvent, stopEvent;
   CHECK_HIP_ERROR(hipEventCreate(&startEvent));
@@ -296,7 +253,7 @@ float deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, 
                       dim3((M/MT0), (N/MT1)),
                       dim3(256),
                       0, 0,
-                      deviceA ,deviceB ,deviceC);
+                      deviceA ,deviceB ,deviceC, K, lda, ldb, ldc);
   }
   CHECK_HIP_ERROR(hipEventRecord(stopEvent));
   CHECK_HIP_ERROR(hipEventSynchronize(stopEvent));
@@ -310,7 +267,6 @@ float deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, 
   CHECK_HIP_ERROR(hipFree(deviceA));
   CHECK_HIP_ERROR(hipFree(deviceB));
   CHECK_HIP_ERROR(hipFree(deviceC));
-  CHECK_HIP_ERROR(hipFree(deviceArg));
 
   return gflops;
 }
