@@ -1,7 +1,5 @@
 #include "hip/hip_runtime.h"
 #include "half.h"
-#include "statically_indexed_array.hpp"
-#include "functional2.hpp"
 
 #define CHECK_HIP_ERROR(status)                   \
     if(status != hipSuccess)                      \
@@ -64,7 +62,7 @@ struct VectorStorage
     using type = T __attribute__((ext_vector_type(Elements)));
 };
 
-__global__ void __launch_bounds__(256, 2)
+__global__ void __launch_bounds__(256)
 gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ldb, int ldc)
 {
     __shared__ char lA[MT0*DepthU*sizeof(half_t)];
@@ -115,11 +113,20 @@ gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ld
 
     half_t tA[TT0 * MIIN];
     half_t tB[TT1 * MIIN];
-    ck::StaticallyIndexedArray<VectorStorage<float,16>::type, TT0*TT1> tC;
+    float  tC[TT0 * TT1 * MFMA_OU * MFMA_OG];
 
     // pointer for mfma instruction
     VectorStorage<float, 2>::type const* pA = reinterpret_cast<VectorStorage<float, 2>::type const*>(&tA);
     VectorStorage<float, 2>::type const* pB = reinterpret_cast<VectorStorage<float, 2>::type const*>(&tB);
+    VectorStorage<float,16>::type const* pC = reinterpret_cast<VectorStorage<float,16>::type const*>(&tC);
+    VectorStorage<float,16>::type      * pD = reinterpret_cast<VectorStorage<float,16>::type      *>(&tC);
+
+    // initial tC
+    for (int i=0; i < TT0 * TT1 * MFMA_OU * MFMA_OG; i++)
+    {
+        tC[i] = 0.0f;
+    }
+
 
     ////////////////////////////////////////////////////////////////////
     // main loop
@@ -171,12 +178,13 @@ gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ld
             }
 
             // mma
-            ck::static_for<0, TT1, 1>{}([&](auto j) {
-                ck::static_for<0, TT0, 1>{}([&](auto i) {
-                    tC.At(i + j * ck::Number<TT0>{}) = __builtin_amdgcn_mfma_f32_32x32x8f16(pA[i], pB[j], tC.At(i + j * ck::Number<TT0>{}), 0, 0, 0);
-                });
-            });
-            
+            for(int j=0; j<TT1; j++)
+            {
+                for(int i=0; i<TT0; i++)
+                {
+                    pD[i + j * TT0] = __builtin_amdgcn_mfma_f32_32x32x8f16(pA[i], pB[j], pC[i + j * TT0], 0, 0, 0);
+                }
+            }
 
             // inc local read to next mi k
             lA_rptr += MFMA_K * MT0;
@@ -200,21 +208,21 @@ gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ld
     c += (wave_id0      * WT0     + wave_id1      * WT1 * ldc);
     c += (unro_id       * MFMA_OU + tile_id             * ldc);
 
-    ck::static_for<0, TT1, 1>{}([&](auto j) {
-        ck::static_for<0, TT0, 1>{}([&](auto i) {
-            float* pSrc = reinterpret_cast<float*>(&tC.At(i + j * ck::Number<TT0>{}));
+    for (int j=0; j<TT1; j++)
+    {
+        for (int i=0; i<TT0; i++)
+        {
             for (int g=0; g<MFMA_OG; g++)
             {
                 for(int u=0; u<MFMA_OU; u++)
                 {
-                    int src_idx = u + MFMA_OU * g;
+                    int src_idx = u + MFMA_OU * (g + MFMA_OG * ( i + TT0 * j));
                     int dst_idx = (u + g * 8 + i * MFMA_T) + (j * MFMA_T * ldc);
-                    c[dst_idx]  = pSrc[src_idx];
+                    c[dst_idx]  = tC[src_idx];
                 }
             }
-        });
-    });
-
+        }
+    }
 }
 
 
