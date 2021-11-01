@@ -63,8 +63,13 @@ struct VectorStorage
 };
 
 __global__ void __launch_bounds__(256)
-gemmKernel(const half_t*  a, const half_t*  b, float*  c, int K, int lda, int ldb, int ldc)
+gemmKernel(const half_t*  a, const half_t*  b, float*  c)
 {
+    int K = 256;
+    int lda = 256;
+    int ldb = 256;
+    int ldc = 256;
+
     __shared__ char lA[MT0*DepthU*sizeof(half_t)];
     __shared__ char lB[MT1*DepthU*sizeof(half_t)];
 
@@ -261,7 +266,7 @@ float deviceGemm(const half_t* hostA, const half_t* hostB, float* hostC, int M, 
                       dim3((M/MT0), (N/MT1)),
                       dim3(256),
                       0, 0,
-                      deviceA ,deviceB ,deviceC, K, lda, ldb, ldc);
+                      deviceA ,deviceB ,deviceC);
   }
   CHECK_HIP_ERROR(hipEventRecord(stopEvent));
   CHECK_HIP_ERROR(hipEventSynchronize(stopEvent));
